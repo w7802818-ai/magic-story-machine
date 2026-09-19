@@ -196,20 +196,25 @@ def generate_audio_file(text, filename="story.mp3"):
 def clean_generated_text(text):
     """
     Remove common GPT-2 artefacts and truncate at a sentence boundary.
+
+    Keeps the cleaning minimal so the story stays long enough.
     """
-    # Strip boiler-plate endings
-    for marker in ["The end.", "The End.", "— The End",
-                    "Once upon", "Once upon a"]:
+    # Remove common GPT-2 boiler-plate endings (only if they appear
+    # well into the text, not at the very beginning)
+    for marker in ["The end.", "The End.", "— The End"]:
         idx = text.rfind(marker)
-        if idx > 0:
+        if idx > 20:                       # only cut if there's real content before it
             text = text[:idx]
 
-    # Cut at the last sentence-ending punctuation
-    for punct in [". ", "! ", "? "]:
-        pos = text.rfind(punct)
-        if pos > 0:
-            text = text[: pos + 1]
-            break
+    # Remove trailing incomplete sentence (no ending punctuation)
+    text = text.rstrip()
+    if text and text[-1] not in ".!?":
+        # Walk back to the last sentence-ending punctuation
+        for punct in [".", "!", "?"]:
+            pos = text.rfind(punct)
+            if pos > 0:
+                text = text[: pos + 1]
+                break
 
     return text.strip()
 
@@ -217,6 +222,10 @@ def clean_generated_text(text):
 def get_image_caption(image, processor, model):
     """
     Generate a descriptive caption for *image* using the BLIP model.
+
+    Uses BLIP's conditional captioning feature with a story-oriented
+    text prefix so the description focuses on narrative-relevant details
+    (characters, setting, mood) rather than generic labels.
 
     Parameters
     ----------
@@ -235,17 +244,35 @@ def get_image_caption(image, processor, model):
     if image.mode != "RGB":
         image = image.convert("RGB")
 
-    # Process the image and generate caption
-    inputs   = processor(image, return_tensors="pt")
-    output   = model.generate(**inputs, max_new_tokens=50)
-    caption  = processor.decode(output[0], skip_special_tokens=True)
+    # Use a conditional text prefix to guide BLIP toward a more
+    # detailed, story-friendly description.
+    condition = "A magical story about"
+    inputs = processor(image, text=condition, return_tensors="pt")
+    output = model.generate(**inputs, max_new_tokens=80)
+    caption = processor.decode(output[0], skip_special_tokens=True)
 
-    return caption.strip()
+    # Strip the prefix that BLIP sometimes echoes back
+    caption = caption.strip()
+    for prefix in [condition, "A magical story about"]:
+        if caption.lower().startswith(prefix.lower()):
+            caption = caption[len(prefix):].strip()
+
+    # Fallback: if caption is empty after stripping, re-generate without condition
+    if not caption:
+        inputs = processor(image, return_tensors="pt")
+        output = model.generate(**inputs, max_new_tokens=60)
+        caption = processor.decode(output[0], skip_special_tokens=True).strip()
+
+    return caption
 
 
 def generate_story(caption, story_pipe):
     """
     Expand *caption* into a short children's story (50-100 words).
+
+    GPT-2 is a *continuation* model, not an instruction-following model,
+    so the prompt is written as the opening of a story that GPT-2 can
+    naturally continue, rather than as an instruction.
 
     Parameters
     ----------
@@ -258,29 +285,31 @@ def generate_story(caption, story_pipe):
     -------
     str  – a kid-friendly story.
     """
-    prompt = (
-        "Write a short, magical bedtime story for young children. "
-        "Use simple, happy words. "
-        "The story begins with: "
-        f"{caption} "
-        "Once upon a time, "
+    # Build a story-like opening that incorporates the caption.
+    # GPT-2 will continue from here in a narrative style.
+    story_start = (
+        f"Once upon a time, {caption}. "
+        "It was a beautiful day in the magical forest, and "
     )
 
     result = story_pipe(
-        prompt,
-        max_new_tokens=200,
-        temperature=0.85,
-        top_p=0.92,
+        story_start,
+        max_new_tokens=300,          # generous budget for a longer story
+        temperature=0.80,
+        top_p=0.90,
         do_sample=True,
-        repetition_penalty=1.3,
+        repetition_penalty=1.4,
         no_repeat_ngram_size=3,
         num_return_sequences=1,
     )
 
     raw_text = result[0]["generated_text"]
 
-    # Remove the prompt portion so only the new story remains
-    story_body = raw_text[len(prompt):] if raw_text.startswith(prompt) else raw_text
+    # The model returns prompt + continuation; extract only the new part
+    if raw_text.startswith(story_start):
+        story_body = raw_text[len(story_start):]
+    else:
+        story_body = raw_text
 
     # Clean and post-process
     story_body = clean_generated_text(story_body)
@@ -288,6 +317,7 @@ def generate_story(caption, story_pipe):
     # ---- enforce 50-100 word window ----
     words = story_body.split()
     MAX_WORDS = 100
+    MIN_WORDS = 40
 
     if len(words) > MAX_WORDS:
         trimmed = " ".join(words[:MAX_WORDS])
@@ -299,13 +329,23 @@ def generate_story(caption, story_pipe):
                 break
         else:
             story_body = trimmed
-    elif len(words) < 10 and caption:
-        # Fallback: use caption as the story when generation is too short
+
+    # If the story is still too short, prepend the caption as the opening
+    if len(story_body.split()) < MIN_WORDS and caption:
         story_body = (
-            f"Once upon a time, {caption} "
-            "It was the most magical thing you could ever imagine! "
-            "And they all lived happily ever after."
+            f"{caption}. "
+            "One sunny morning, a little adventure began in the enchanted forest. "
+            f"{story_body}"
         )
+        # Re-trim if needed
+        words = story_body.split()
+        if len(words) > MAX_WORDS:
+            trimmed = " ".join(words[:MAX_WORDS])
+            for punct in [".", "!", "?"]:
+                pos = trimmed.rfind(punct)
+                if pos > 0:
+                    story_body = trimmed[: pos + 1]
+                    break
 
     return story_body.strip()
 
@@ -351,7 +391,7 @@ def main():
             st.image(
                 image,
                 caption="Your beautiful picture!",
-                use_container_width=True,
+                width="stretch",
             )
 
         # ---- Action Button ----
