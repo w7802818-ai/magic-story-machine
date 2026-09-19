@@ -4,11 +4,8 @@
 # Web application framework
 streamlit>=1.28.0
 
-# Hugging Face Transformers (BLIP for captioning)
+# Hugging Face Transformers (BLIP for captioning, Qwen2.5 for story generation)
 transformers>=4.35.0
-
-# Hugging Face Hub (Inference API client for story generation)
-huggingface_hub>=0.20.0
 
 # PyTorch — backend for Transformers models
 torch>=2.0.0

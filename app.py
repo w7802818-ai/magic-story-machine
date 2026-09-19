@@ -4,14 +4,14 @@ Storytelling Application using Hugging Face Models
 
 This Streamlit application allows users to upload an image, generates a
 description using Hugging Face BLIP model, then creates a children's story
-(500+ words) based on the description using Mistral-7B-Instruct, and
+(500+ words) based on the description using Qwen2.5-Instruct, and
 converts the story to speech for an engaging experience.
 
 Designed for children aged 3-10 years old.
 
 Models used:
     - Image Captioning : Salesforce/blip-image-captioning-base (Hugging Face)
-    - Story Generation : mistralai/Mistral-7B-Instruct-v0.3 (via HF Inference API)
+    - Story Generation : Qwen/Qwen2.5-0.5B-Instruct (Hugging Face)
     - Text-to-Speech   : gTTS (Google Text-to-Speech)
 
 Author: [Student Name]
@@ -20,8 +20,7 @@ Date:   [Submission Date]
 
 import streamlit as st
 from PIL import Image
-from transformers import BlipProcessor, BlipForConditionalGeneration
-from huggingface_hub import InferenceClient
+from transformers import BlipProcessor, BlipForConditionalGeneration, pipeline
 import os
 import tempfile
 
@@ -178,16 +177,24 @@ def load_captioning_model():
     return processor, model
 
 
-@st.cache_resource(show_spinner="Connecting to story generation service ...")
-def get_story_client():
+@st.cache_resource(show_spinner="Loading story generation model ...")
+def load_story_model():
     """
-    Return a Hugging Face Inference API client using the free serverless
-    text_generation endpoint — no API key or token required.
+    Load the Qwen2.5-0.5B-Instruct text-generation pipeline locally.
 
-    The model runs on HF servers, so no local download or GPU is needed.
+    Qwen2.5-0.5B is a small but capable instruction-following model (~500MB)
+    that runs reliably on Streamlit Cloud's CPU without GPU or API keys.
+    Uses eager attention and auto dtype for maximum CPU compatibility.
     """
-    return InferenceClient(
-        model="mistralai/Mistral-7B-Instruct-v0.3",
+    import torch
+
+    return pipeline(
+        "text-generation",
+        model="Qwen/Qwen2.5-0.5B-Instruct",
+        model_kwargs={
+            "torch_dtype": torch.float32,         # float32 is safest for CPU
+            "attn_implementation": "eager",        # avoid flash_attn dependency
+        },
     )
 
 
@@ -227,31 +234,34 @@ def get_image_caption(image, processor, model):
     return caption
 
 
-def generate_story_from_caption(caption, client):
+def generate_story_from_caption(caption, story_pipe):
     """
-    Use Hugging Face Inference API (Mistral-7B) to generate a children's story
+    Use Qwen2.5-0.5B-Instruct (local model) to generate a children's story
     (>= 500 words) that is directly based on the BLIP image description.
 
-    Uses the free serverless text_generation endpoint — no API key required.
+    Qwen2.5 is an instruction-following model, so we format the input
+    as a chat conversation using the pipeline's built-in chat template.
 
     Parameters
     ----------
     caption : str
         Image description produced by the BLIP model.
-    client : huggingface_hub.InferenceClient
-        HF Inference API client (already configured with model).
+    story_pipe : transformers.Pipeline
+        Pre-loaded Qwen2.5 text-generation pipeline.
 
     Returns
     -------
     str  – a children's story of at least 500 words.
     """
-    # Build the prompt in Mistral's chat template format
-    prompt = (
-        "<s>[INST] You are a beloved children's storyteller who writes vivid, "
+    system_prompt = (
+        "You are a beloved children's storyteller who writes vivid, "
         "magical stories for kids aged 3 to 10. Your stories are warm, "
         "fun, and full of wonder. Use simple vocabulary that young "
         "children can understand, but make the storytelling rich and "
-        "engaging with sensory details, dialogue, and gentle humour.\n\n"
+        "engaging with sensory details, dialogue, and gentle humour."
+    )
+
+    user_prompt = (
         f"An image was analysed by an AI and the following description was produced:\n\n"
         f"\"{caption}\"\n\n"
         f"Based EXACTLY on this description, write a complete children's story. "
@@ -264,24 +274,37 @@ def generate_story_from_caption(caption, client):
         f"5. Use short sentences and simple words suitable for young children.\n"
         f"6. Add some dialogue between characters to make the story lively.\n"
         f"7. Do NOT include any scary or inappropriate content.\n\n"
-        f"Write the full story now: [/INST]"
+        f"Write the full story now:"
     )
 
-    # Use the free serverless text_generation endpoint (no token needed)
-    response = client.text_generation(
-        prompt=prompt,
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user",   "content": user_prompt},
+    ]
+
+    output = story_pipe(
+        messages,
         max_new_tokens=3000,
         temperature=0.8,
         top_p=0.9,
-        return_full_text=False,
+        do_sample=True,
+        repetition_penalty=1.3,
+        num_return_sequences=1,
     )
 
-    # text_generation with return_full_text=False returns the generated text directly
-    if isinstance(response, str):
-        story = response
-    else:
-        # Some versions return a dict or TextGenerationOutput object
-        story = response.generated_text if hasattr(response, "generated_text") else str(response)
+    story = output[0]["generated_text"]
+
+    # The pipeline with chat template returns the full conversation;
+    # extract only the assistant's response (the last message).
+    if isinstance(story, list):
+        # Newer transformers versions return a list of message dicts
+        story = story[-1]["content"]
+    elif isinstance(story, str):
+        # Older versions return formatted text — extract assistant reply
+        idx = story.rfind("assistant")
+        if idx != -1:
+            story = story[idx + len("assistant"):]
+        story = story.strip()
 
     return story.strip()
 
@@ -359,16 +382,12 @@ def main():
                 caption = get_image_caption(image, processor, model)
                 st.session_state.caption = caption
 
-            # --- Step 2: Story Generation (HF Inference API — Mistral-7B) ---
+            # --- Step 2: Story Generation (Qwen2.5-0.5B-Instruct) ---
             with st.spinner("\u270D\uFE0F  Writing a magical story (this may take a moment) \u2026"):
-                try:
-                    client = get_story_client()
-                    story = generate_story_from_caption(caption, client)
-                    st.session_state.story = story
-                    story_generated = True
-                except Exception as exc:
-                    st.error(f"Story generation failed: {exc}")
-                    st.info("The Hugging Face Inference API may be busy. Please try again in a moment.")
+                story_pipe = load_story_model()
+                story = generate_story_from_caption(caption, story_pipe)
+                st.session_state.story = story
+                story_generated = True
 
             # --- Step 3: Text-to-Speech ---
             if story_generated:
@@ -413,7 +432,7 @@ def main():
             )
             st.markdown(
                 '<p style="text-align:center; color:#636e72; font-size:0.9rem;">'
-                "\u2B06 This story was generated by Mistral-7B (Hugging Face Inference API) based on the image description above"
+                "\u2B06 This story was generated by Qwen2.5-0.5B-Instruct based on the image description above"
                 "</p>",
                 unsafe_allow_html=True,
             )
