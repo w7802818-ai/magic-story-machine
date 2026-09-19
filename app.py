@@ -1,17 +1,18 @@
 """
 ISOM5240 Individual Assignment
-Storytelling Application using Hugging Face Pipelines
+Storytelling Application using Hugging Face Models
 
 This Streamlit application allows users to upload an image, generates a
-children's story based on the image content using Hugging Face models,
-and converts the story to speech for an engaging experience.
+description using Hugging Face BLIP model, then creates a children's story
+(500+ words) based on the description using Mistral-7B-Instruct, and
+converts the story to speech for an engaging experience.
 
 Designed for children aged 3-10 years old.
 
 Models used:
-    - Image Captioning: Salesforce/blip-image-captioning-base
-    - Story Generation: gpt2 (via text-generation pipeline)
-    - Text-to-Speech: gTTS (Google Text-to-Speech)
+    - Image Captioning : Salesforce/blip-image-captioning-base (Hugging Face)
+    - Story Generation : mistralai/Mistral-7B-Instruct-v0.3 (Hugging Face)
+    - Text-to-Speech   : gTTS (Google Text-to-Speech)
 
 Author: [Student Name]
 Date:   [Submission Date]
@@ -19,7 +20,7 @@ Date:   [Submission Date]
 
 import streamlit as st
 from PIL import Image
-from transformers import pipeline, BlipProcessor, BlipForConditionalGeneration
+from transformers import BlipProcessor, BlipForConditionalGeneration, pipeline
 import os
 
 # ============================================================
@@ -84,9 +85,22 @@ footer { visibility: hidden; }
     margin-bottom: 1rem;
 }
 
+/* ---- Description box (BLIP output) ---- */
+.description-box {
+    font-size: 1.15rem;
+    line-height: 1.8;
+    color: #2d3436;
+    text-align: left;
+    padding: 1rem 1.5rem;
+    background: linear-gradient(135deg, #d4fc79 0%, #96e6a1 100%);
+    border-radius: 16px;
+    border-left: 5px solid #00b894;
+    font-family: 'Georgia', serif;
+}
+
 /* ---- Story text ---- */
 .story-text {
-    font-size: 1.35rem;
+    font-size: 1.25rem;
     line-height: 2;
     color: #2d3436;
     text-align: left;
@@ -95,15 +109,15 @@ footer { visibility: hidden; }
     border-radius: 16px;
     border-left: 5px solid #e17055;
     font-family: 'Georgia', serif;
+    white-space: pre-wrap;
 }
 
-/* ---- Caption text ---- */
-.caption-text {
-    font-size: 0.95rem;
+/* ---- Word count badge ---- */
+.word-count {
+    text-align: right;
+    font-size: 0.9rem;
     color: #636e72;
-    text-align: center;
-    font-style: italic;
-    padding: 0.5rem;
+    margin-top: 0.3rem;
 }
 
 /* ---- Buttons ---- */
@@ -143,7 +157,6 @@ st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 if "story"       not in st.session_state: st.session_state.story       = None
 if "caption"     not in st.session_state: st.session_state.caption     = None
 if "audio_file"  not in st.session_state: st.session_state.audio_file  = None
-if "uploaded"    not in st.session_state: st.session_state.uploaded    = False
 
 # ============================================================
 # Model Loading (cached — loaded once per session)
@@ -152,24 +165,145 @@ if "uploaded"    not in st.session_state: st.session_state.uploaded    = False
 @st.cache_resource(show_spinner="Loading image captioning model ...")
 def load_captioning_model():
     """
-    Load the BLIP image-captioning processor and model directly.
+    Load the BLIP image-captioning processor and model from Hugging Face.
 
-    Using BlipProcessor + BlipForConditionalGeneration instead of the
-    pipeline abstraction for maximum compatibility across transformers
-    versions (avoids 'Unknown task: image-to-text' errors).
+    Uses BlipProcessor + BlipForConditionalGeneration directly for maximum
+    compatibility across transformers versions.
     """
-    processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
-    model     = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
+    model_name = "Salesforce/blip-image-captioning-base"
+    processor = BlipProcessor.from_pretrained(model_name)
+    model     = BlipForConditionalGeneration.from_pretrained(model_name)
     return processor, model
 
 
-@st.cache_resource(show_spinner="Loading story generation model ...")
+@st.cache_resource(show_spinner="Loading story generation model (Mistral-7B) ...")
 def load_story_model():
-    """Load the GPT-2 text-generation pipeline from Hugging Face."""
+    """
+    Load the Mistral-7B-Instruct text-generation pipeline from Hugging Face.
+
+    This is a free, high-quality instruction-following model that produces
+    much better stories than GPT-2, with no API key required.
+    """
     return pipeline(
         "text-generation",
-        model="gpt2",
+        model="mistralai/Mistral-7B-Instruct-v0.3",
+        torch_dtype="auto",
     )
+
+
+# ============================================================
+# Core Functions
+# ============================================================
+
+def get_image_caption(image, processor, model):
+    """
+    Generate a descriptive caption for *image* using the BLIP model.
+
+    Uses unconditional captioning so the description accurately reflects
+    the actual image content.  The result is displayed on the page for
+    the user to see before the story is generated.
+
+    Parameters
+    ----------
+    image : PIL.Image.Image
+    processor : BlipProcessor
+    model : BlipForConditionalGeneration
+
+    Returns
+    -------
+    str  – a sentence describing the image.
+    """
+    if image.mode != "RGB":
+        image = image.convert("RGB")
+
+    # Unconditional captioning — most faithful to the image
+    inputs = processor(image, return_tensors="pt")
+    output = model.generate(
+        **inputs,
+        max_new_tokens=80,
+        num_beams=3,
+    )
+    caption = processor.decode(output[0], skip_special_tokens=True).strip()
+    return caption
+
+
+def generate_story_from_caption(caption, story_pipe):
+    """
+    Use Mistral-7B-Instruct (Hugging Face) to generate a children's story
+    (>= 500 words) that is directly based on the BLIP image description.
+
+    Mistral-7B-Instruct is an instruction-following model, so we format
+    the prompt as a chat conversation using its built-in template.
+
+    Parameters
+    ----------
+    caption : str
+        Image description produced by the BLIP model.
+    story_pipe : transformers.Pipeline
+        Pre-loaded Mistral-7B text-generation pipeline.
+
+    Returns
+    -------
+    str  – a children's story of at least 500 words.
+    """
+    system_prompt = (
+        "You are a beloved children's storyteller who writes vivid, "
+        "magical stories for kids aged 3 to 10. Your stories are warm, "
+        "fun, and full of wonder. Use simple vocabulary that young "
+        "children can understand, but make the storytelling rich and "
+        "engaging with sensory details, dialogue, and gentle humour."
+    )
+
+    user_prompt = (
+        f"An image was analysed by an AI and the following description was produced:\n\n"
+        f"\"{caption}\"\n\n"
+        f"Based EXACTLY on this description, write a complete children's story. "
+        f"Requirements:\n"
+        f"1. The story MUST directly relate to the description above — use the same "
+        f"characters, setting, and key elements mentioned.\n"
+        f"2. The story MUST be at least 500 words long. Be creative and detailed.\n"
+        f"3. Give the characters names and a simple personality.\n"
+        f"4. Include a clear beginning, middle, and happy ending.\n"
+        f"5. Use short sentences and simple words suitable for young children.\n"
+        f"6. Add some dialogue between characters to make the story lively.\n"
+        f"7. Do NOT include any scary or inappropriate content.\n\n"
+        f"Write the full story now:"
+    )
+
+    # Format as a Mistral chat conversation
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user",   "content": user_prompt},
+    ]
+
+    output = story_pipe(
+        messages,
+        max_new_tokens=3000,       # generous budget for >= 500 words
+        temperature=0.8,
+        top_p=0.9,
+        do_sample=True,
+        repetition_penalty=1.3,
+        num_return_sequences=1,
+    )
+
+    story = output[0]["generated_text"]
+
+    # The pipeline returns the full chat including special tokens;
+    # extract only the assistant's response content.
+    if isinstance(story, str):
+        # Mistral chat template ends with [/INST] before the answer
+        for marker in ["[/INST]", "assistant"]:
+            idx = story.rfind(marker)
+            if idx != -1:
+                story = story[idx + len(marker):]
+                break
+        story = story.strip()
+        # Remove any trailing  tags that may have been generated
+        if "" in story:
+            story = story[:story.index("")]
+        story = story.strip()
+
+    return story
 
 
 def generate_audio_file(text, filename="story.mp3"):
@@ -190,166 +324,6 @@ def generate_audio_file(text, filename="story.mp3"):
         return None
 
 # ============================================================
-# Core Functions
-# ============================================================
-
-def clean_generated_text(text):
-    """
-    Remove common GPT-2 artefacts and truncate at a sentence boundary.
-
-    Keeps the cleaning minimal so the story stays long enough.
-    """
-    # Remove common GPT-2 boiler-plate endings (only if they appear
-    # well into the text, not at the very beginning)
-    for marker in ["The end.", "The End.", "— The End"]:
-        idx = text.rfind(marker)
-        if idx > 20:                       # only cut if there's real content before it
-            text = text[:idx]
-
-    # Remove trailing incomplete sentence (no ending punctuation)
-    text = text.rstrip()
-    if text and text[-1] not in ".!?":
-        # Walk back to the last sentence-ending punctuation
-        for punct in [".", "!", "?"]:
-            pos = text.rfind(punct)
-            if pos > 0:
-                text = text[: pos + 1]
-                break
-
-    return text.strip()
-
-
-def get_image_caption(image, processor, model):
-    """
-    Generate a descriptive caption for *image* using the BLIP model.
-
-    Uses BLIP's conditional captioning feature with a story-oriented
-    text prefix so the description focuses on narrative-relevant details
-    (characters, setting, mood) rather than generic labels.
-
-    Parameters
-    ----------
-    image : PIL.Image.Image
-        The uploaded image.
-    processor : BlipProcessor
-        Pre-loaded BLIP processor.
-    model : BlipForConditionalGeneration
-        Pre-loaded BLIP model.
-
-    Returns
-    -------
-    str  – a short caption describing the image.
-    """
-    # BLIP expects RGB images
-    if image.mode != "RGB":
-        image = image.convert("RGB")
-
-    # Use a conditional text prefix to guide BLIP toward a more
-    # detailed, story-friendly description.
-    condition = "A magical story about"
-    inputs = processor(image, text=condition, return_tensors="pt")
-    output = model.generate(**inputs, max_new_tokens=80)
-    caption = processor.decode(output[0], skip_special_tokens=True)
-
-    # Strip the prefix that BLIP sometimes echoes back
-    caption = caption.strip()
-    for prefix in [condition, "A magical story about"]:
-        if caption.lower().startswith(prefix.lower()):
-            caption = caption[len(prefix):].strip()
-
-    # Fallback: if caption is empty after stripping, re-generate without condition
-    if not caption:
-        inputs = processor(image, return_tensors="pt")
-        output = model.generate(**inputs, max_new_tokens=60)
-        caption = processor.decode(output[0], skip_special_tokens=True).strip()
-
-    return caption
-
-
-def generate_story(caption, story_pipe):
-    """
-    Expand *caption* into a short children's story (50-100 words).
-
-    GPT-2 is a *continuation* model, not an instruction-following model,
-    so the prompt is written as the opening of a story that GPT-2 can
-    naturally continue, rather than as an instruction.
-
-    Parameters
-    ----------
-    caption : str
-        Image caption produced by ``get_image_caption``.
-    story_pipe : transformers.Pipeline
-        Pre-loaded text-generation pipeline (GPT-2).
-
-    Returns
-    -------
-    str  – a kid-friendly story.
-    """
-    # Build a story-like opening that incorporates the caption.
-    # GPT-2 will continue from here in a narrative style.
-    story_start = (
-        f"Once upon a time, {caption}. "
-        "It was a beautiful day in the magical forest, and "
-    )
-
-    result = story_pipe(
-        story_start,
-        max_new_tokens=300,          # generous budget for a longer story
-        temperature=0.80,
-        top_p=0.90,
-        do_sample=True,
-        repetition_penalty=1.4,
-        no_repeat_ngram_size=3,
-        num_return_sequences=1,
-    )
-
-    raw_text = result[0]["generated_text"]
-
-    # The model returns prompt + continuation; extract only the new part
-    if raw_text.startswith(story_start):
-        story_body = raw_text[len(story_start):]
-    else:
-        story_body = raw_text
-
-    # Clean and post-process
-    story_body = clean_generated_text(story_body)
-
-    # ---- enforce 50-100 word window ----
-    words = story_body.split()
-    MAX_WORDS = 100
-    MIN_WORDS = 40
-
-    if len(words) > MAX_WORDS:
-        trimmed = " ".join(words[:MAX_WORDS])
-        # Walk back to the last sentence boundary
-        for punct in [".", "!", "?"]:
-            pos = trimmed.rfind(punct)
-            if pos > 0:
-                story_body = trimmed[: pos + 1]
-                break
-        else:
-            story_body = trimmed
-
-    # If the story is still too short, prepend the caption as the opening
-    if len(story_body.split()) < MIN_WORDS and caption:
-        story_body = (
-            f"{caption}. "
-            "One sunny morning, a little adventure began in the enchanted forest. "
-            f"{story_body}"
-        )
-        # Re-trim if needed
-        words = story_body.split()
-        if len(words) > MAX_WORDS:
-            trimmed = " ".join(words[:MAX_WORDS])
-            for punct in [".", "!", "?"]:
-                pos = trimmed.rfind(punct)
-                if pos > 0:
-                    story_body = trimmed[: pos + 1]
-                    break
-
-    return story_body.strip()
-
-# ============================================================
 # Main Application — UI
 # ============================================================
 
@@ -363,76 +337,93 @@ def main():
     )
     st.markdown(
         '<p class="sub-title">'
-        "Upload a picture and watch a magical story appear just for you!"
+        "Upload a picture \u2192 AI describes it \u2192 A magical story appears!"
         "</p>",
         unsafe_allow_html=True,
     )
 
     # ---- Upload Section ----
-    st.markdown(
-        '<div class="card">', unsafe_allow_html=True
-    )
-    st.markdown("### \U0001F4F7  Step 1 — Upload Your Picture!")
+    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown("### \U0001F4F7  Step 1 \u2014 Upload Your Picture!")
 
     uploaded_image = st.file_uploader(
         "Choose an image file (JPG, PNG, GIF, WebP)",
         type=["jpg", "jpeg", "png", "gif", "webp"],
-        help="Pick any photo — a pet, a landscape, your favourite toy …",
+        help="Pick any photo \u2014 a pet, a landscape, your favourite toy \u2026",
     )
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # ---- Image Preview ----
+    # ---- Image Preview & Generation ----
     if uploaded_image is not None:
-        st.session_state.uploaded = True
         image = Image.open(uploaded_image)
 
         col_l, col_m, col_r = st.columns([1, 3, 1])
         with col_m:
-            st.image(
-                image,
-                caption="Your beautiful picture!",
-                width="stretch",
-            )
+            st.image(image, caption="Your beautiful picture!", width="stretch")
 
         # ---- Action Button ----
         st.markdown("<br>", unsafe_allow_html=True)
         generate_col, _ = st.columns([1, 4])
         with generate_col:
-            clicked = st.button(
-                "\u2728  Create My Story!  \u2728",
-                use_container_width=False,
-            )
+            clicked = st.button("\u2728  Create My Story!  \u2728")
 
         if clicked:
-            with st.spinner("\U0001F914  Looking at your picture …"):
+            # --- Step 1: Image Captioning (BLIP) ---
+            with st.spinner("\U0001F914  Looking at your picture \u2026"):
                 processor, model = load_captioning_model()
                 caption = get_image_caption(image, processor, model)
                 st.session_state.caption = caption
 
-            with st.spinner("\u270D\uFE0F  Writing a magical story …"):
+            # --- Step 2: Story Generation (Mistral-7B) ---
+            with st.spinner("\u270D\uFE0F  Writing a magical story (this may take a moment) \u2026"):
                 story_pipe = load_story_model()
-                story = generate_story(caption, story_pipe)
+                story = generate_story_from_caption(caption, story_pipe)
                 st.session_state.story = story
 
-            with st.spinner("\U0001F50A  Preparing the audio …"):
+            # --- Step 3: Text-to-Speech ---
+            with st.spinner("\U0001F50A  Preparing the audio \u2026"):
                 audio_path = generate_audio_file(story)
                 st.session_state.audio_file = audio_path
+
+        # ---- Display Image Description (BLIP output) ----
+        if st.session_state.caption:
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown('<div class="card">', unsafe_allow_html=True)
+            st.markdown("### \U0001F4DD  Step 2 \u2014 What the AI Sees")
+            st.markdown(
+                f'<div class="description-box">{st.session_state.caption}</div>',
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                '<p style="text-align:center; color:#636e72; font-size:0.9rem;">'
+                "\u2B06 This description was generated from your image by "
+                "Salesforce/blip-image-captioning-base"
+                "</p>",
+                unsafe_allow_html=True,
+            )
+            st.markdown("</div>", unsafe_allow_html=True)
 
         # ---- Display Story ----
         if st.session_state.story:
             st.markdown("<br>", unsafe_allow_html=True)
-            st.markdown(
-                '<div class="card">', unsafe_allow_html=True
-            )
-            st.markdown("### \U0001F4D6  Your Magical Story!")
+            st.markdown('<div class="card">', unsafe_allow_html=True)
+            st.markdown("### \U0001F4D6  Step 3 \u2014 Your Magical Story!")
+
             st.markdown(
                 f'<div class="story-text">{st.session_state.story}</div>',
                 unsafe_allow_html=True,
             )
+
+            # Word count
+            word_count = len(st.session_state.story.split())
             st.markdown(
-                f'<p class="caption-text">'
-                f"\U0001F4DD Image description: {st.session_state.caption}"
-                f"</p>",
+                f'<p class="word-count">Word count: {word_count}</p>',
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                '<p style="text-align:center; color:#636e72; font-size:0.9rem;">'
+                "\u2B06 This story was generated by Mistral-7B-Instruct based on the image description above"
+                "</p>",
                 unsafe_allow_html=True,
             )
             st.markdown("</div>", unsafe_allow_html=True)
@@ -440,9 +431,7 @@ def main():
             # ---- Audio Player ----
             if st.session_state.audio_file:
                 st.markdown("<br>", unsafe_allow_html=True)
-                st.markdown(
-                    '<div class="card">', unsafe_allow_html=True
-                )
+                st.markdown('<div class="card">', unsafe_allow_html=True)
                 st.markdown("### \U0001F3B5  Listen to Your Story!")
                 with open(st.session_state.audio_file, "rb") as f:
                     st.audio(f.read(), format="audio/mp3")

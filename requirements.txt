@@ -4,13 +4,13 @@
 # Web application framework
 streamlit>=1.28.0
 
-# Hugging Face Transformers (BLIP for captioning, GPT-2 for story generation)
+# Hugging Face Transformers (BLIP for captioning, Mistral-7B for story generation)
 transformers>=4.35.0
 
 # PyTorch — backend for Transformers models
 torch>=2.0.0
 
-# TorchVision — required by BLIP and other vision models in transformers
+# TorchVision — required by some transformers image modules
 torchvision>=0.15.0
 
 # Pillow — image handling

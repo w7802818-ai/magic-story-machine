@@ -1,0 +1,16 @@
+# Streamlit secrets — never commit API keys
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Audio output
+*.mp3
+
+# OS files
+.DS_Store
+Thumbs.db
