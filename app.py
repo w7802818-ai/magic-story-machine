@@ -190,6 +190,7 @@ def load_story_model():
         model="microsoft/Phi-3-mini-4k-instruct",
         dtype="auto",
         trust_remote_code=True,
+        model_kwargs={"attn_implementation": "eager"},
     )
 
 
