@@ -10,6 +10,9 @@ transformers>=4.35.0
 # PyTorch — backend for Transformers models
 torch>=2.0.0
 
+# TorchVision — required by BLIP and other vision models in transformers
+torchvision>=0.15.0
+
 # Pillow — image handling
 Pillow>=10.0.0
 
