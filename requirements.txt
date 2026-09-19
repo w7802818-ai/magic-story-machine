@@ -4,7 +4,7 @@
 # Web application framework
 streamlit>=1.28.0
 
-# Hugging Face Transformers (pipelines for captioning & story generation)
+# Hugging Face Transformers (BLIP for captioning, GPT-2 for story generation)
 transformers>=4.35.0
 
 # PyTorch — backend for Transformers models

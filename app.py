@@ -10,7 +10,7 @@ Designed for children aged 3-10 years old.
 
 Models used:
     - Image Captioning: Salesforce/blip-image-captioning-base
-    - Story Generation: gpt2
+    - Story Generation: gpt2 (via text-generation pipeline)
     - Text-to-Speech: gTTS (Google Text-to-Speech)
 
 Author: [Student Name]
@@ -19,7 +19,7 @@ Date:   [Submission Date]
 
 import streamlit as st
 from PIL import Image
-from transformers import pipeline
+from transformers import pipeline, BlipProcessor, BlipForConditionalGeneration
 import os
 
 # ============================================================
@@ -151,11 +151,16 @@ if "uploaded"    not in st.session_state: st.session_state.uploaded    = False
 
 @st.cache_resource(show_spinner="Loading image captioning model ...")
 def load_captioning_model():
-    """Load the BLIP image-captioning pipeline from Hugging Face."""
-    return pipeline(
-        "image-to-text",
-        model="Salesforce/blip-image-captioning-base",
-    )
+    """
+    Load the BLIP image-captioning processor and model directly.
+
+    Using BlipProcessor + BlipForConditionalGeneration instead of the
+    pipeline abstraction for maximum compatibility across transformers
+    versions (avoids 'Unknown task: image-to-text' errors).
+    """
+    processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
+    model     = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
+    return processor, model
 
 
 @st.cache_resource(show_spinner="Loading story generation model ...")
@@ -209,7 +214,7 @@ def clean_generated_text(text):
     return text.strip()
 
 
-def get_image_caption(image, caption_pipe):
+def get_image_caption(image, processor, model):
     """
     Generate a descriptive caption for *image* using the BLIP model.
 
@@ -217,19 +222,25 @@ def get_image_caption(image, caption_pipe):
     ----------
     image : PIL.Image.Image
         The uploaded image.
-    caption_pipe : transformers.Pipeline
-        Pre-loaded image-to-text pipeline.
+    processor : BlipProcessor
+        Pre-loaded BLIP processor.
+    model : BlipForConditionalGeneration
+        Pre-loaded BLIP model.
 
     Returns
     -------
     str  – a short caption describing the image.
     """
+    # BLIP expects RGB images
     if image.mode != "RGB":
         image = image.convert("RGB")
 
-    result  = caption_pipe(image, max_new_tokens=50)
-    caption = result[0]["generated_text"].strip()
-    return caption
+    # Process the image and generate caption
+    inputs   = processor(image, return_tensors="pt")
+    output   = model.generate(**inputs, max_new_tokens=50)
+    caption  = processor.decode(output[0], skip_special_tokens=True)
+
+    return caption.strip()
 
 
 def generate_story(caption, story_pipe):
@@ -354,8 +365,8 @@ def main():
 
         if clicked:
             with st.spinner("\U0001F914  Looking at your picture …"):
-                caption_pipe = load_captioning_model()
-                caption = get_image_caption(image, caption_pipe)
+                processor, model = load_captioning_model()
+                caption = get_image_caption(image, processor, model)
                 st.session_state.caption = caption
 
             with st.spinner("\u270D\uFE0F  Writing a magical story …"):
