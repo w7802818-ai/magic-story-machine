@@ -23,6 +23,7 @@ from PIL import Image
 from transformers import BlipProcessor, BlipForConditionalGeneration
 from huggingface_hub import InferenceClient
 import os
+import tempfile
 
 # ============================================================
 # Page Configuration — must be the first Streamlit command
@@ -177,14 +178,17 @@ def load_captioning_model():
     return processor, model
 
 
+@st.cache_resource(show_spinner="Connecting to story generation service ...")
 def get_story_client():
     """
-    Return a Hugging Face Inference API client.
+    Return a Hugging Face Inference API client using the free serverless
+    text_generation endpoint — no API key or token required.
 
-    The model runs on HF servers — no local download or GPU needed.
-    Free to use, no API key required.
+    The model runs on HF servers, so no local download or GPU is needed.
     """
-    return InferenceClient()
+    return InferenceClient(
+        model="mistralai/Mistral-7B-Instruct-v0.3",
+    )
 
 
 # ============================================================
@@ -228,28 +232,26 @@ def generate_story_from_caption(caption, client):
     Use Hugging Face Inference API (Mistral-7B) to generate a children's story
     (>= 500 words) that is directly based on the BLIP image description.
 
-    The model runs on HF servers — no local GPU or model download needed.
+    Uses the free serverless text_generation endpoint — no API key required.
 
     Parameters
     ----------
     caption : str
         Image description produced by the BLIP model.
     client : huggingface_hub.InferenceClient
-        HF Inference API client.
+        HF Inference API client (already configured with model).
 
     Returns
     -------
     str  – a children's story of at least 500 words.
     """
-    system_prompt = (
-        "You are a beloved children's storyteller who writes vivid, "
+    # Build the prompt in Mistral's chat template format
+    prompt = (
+        "<s>[INST] You are a beloved children's storyteller who writes vivid, "
         "magical stories for kids aged 3 to 10. Your stories are warm, "
         "fun, and full of wonder. Use simple vocabulary that young "
         "children can understand, but make the storytelling rich and "
-        "engaging with sensory details, dialogue, and gentle humour."
-    )
-
-    user_prompt = (
+        "engaging with sensory details, dialogue, and gentle humour.\n\n"
         f"An image was analysed by an AI and the following description was produced:\n\n"
         f"\"{caption}\"\n\n"
         f"Based EXACTLY on this description, write a complete children's story. "
@@ -262,38 +264,42 @@ def generate_story_from_caption(caption, client):
         f"5. Use short sentences and simple words suitable for young children.\n"
         f"6. Add some dialogue between characters to make the story lively.\n"
         f"7. Do NOT include any scary or inappropriate content.\n\n"
-        f"Write the full story now:"
+        f"Write the full story now: [/INST]"
     )
 
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user",   "content": user_prompt},
-    ]
-
-    # Use HF Inference API — model runs on HF servers, not locally
-    response = client.chat.completions.create(
-        model="mistralai/Mistral-7B-Instruct-v0.3",
-        messages=messages,
-        max_tokens=3000,
+    # Use the free serverless text_generation endpoint (no token needed)
+    response = client.text_generation(
+        prompt=prompt,
+        max_new_tokens=3000,
         temperature=0.8,
         top_p=0.9,
+        return_full_text=False,
     )
 
-    story = response.choices[0].message.content.strip()
-    return story
+    # text_generation with return_full_text=False returns the generated text directly
+    if isinstance(response, str):
+        story = response
+    else:
+        # Some versions return a dict or TextGenerationOutput object
+        story = response.generated_text if hasattr(response, "generated_text") else str(response)
+
+    return story.strip()
 
 
-def generate_audio_file(text, filename="story.mp3"):
+def generate_audio_file(text):
     """
     Convert *text* to an MP3 audio file via gTTS.
+
+    Uses a temporary file to ensure it works on Streamlit Cloud
+    where the working directory may not be writable.
 
     Returns the file path on success, or None on failure.
     """
     try:
         from gtts import gTTS
 
-        tts  = gTTS(text=text, lang="en", slow=True)   # slow for kids
-        path = os.path.join(os.getcwd(), filename)
+        tts = gTTS(text=text, lang="en", slow=True)   # slow for kids
+        path = os.path.join(tempfile.gettempdir(), "story.mp3")
         tts.save(path)
         return path
     except Exception as exc:
@@ -345,6 +351,8 @@ def main():
             clicked = st.button("\u2728  Create My Story!  \u2728")
 
         if clicked:
+            story_generated = False
+
             # --- Step 1: Image Captioning (BLIP) ---
             with st.spinner("\U0001F914  Looking at your picture \u2026"):
                 processor, model = load_captioning_model()
@@ -353,14 +361,20 @@ def main():
 
             # --- Step 2: Story Generation (HF Inference API — Mistral-7B) ---
             with st.spinner("\u270D\uFE0F  Writing a magical story (this may take a moment) \u2026"):
-                client = get_story_client()
-                story = generate_story_from_caption(caption, client)
-                st.session_state.story = story
+                try:
+                    client = get_story_client()
+                    story = generate_story_from_caption(caption, client)
+                    st.session_state.story = story
+                    story_generated = True
+                except Exception as exc:
+                    st.error(f"Story generation failed: {exc}")
+                    st.info("The Hugging Face Inference API may be busy. Please try again in a moment.")
 
             # --- Step 3: Text-to-Speech ---
-            with st.spinner("\U0001F50A  Preparing the audio \u2026"):
-                audio_path = generate_audio_file(story)
-                st.session_state.audio_file = audio_path
+            if story_generated:
+                with st.spinner("\U0001F50A  Preparing the audio \u2026"):
+                    audio_path = generate_audio_file(story)
+                    st.session_state.audio_file = audio_path
 
         # ---- Display Image Description (BLIP output) ----
         if st.session_state.caption:
