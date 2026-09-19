@@ -11,7 +11,7 @@ Designed for children aged 3-10 years old.
 
 Models used:
     - Image Captioning : Salesforce/blip-image-captioning-base (Hugging Face)
-    - Story Generation : microsoft/Phi-3-mini-4k-instruct (Hugging Face)
+    - Story Generation : mistralai/Mistral-7B-Instruct-v0.3 (via HF Inference API)
     - Text-to-Speech   : gTTS (Google Text-to-Speech)
 
 Author: [Student Name]
@@ -20,7 +20,8 @@ Date:   [Submission Date]
 
 import streamlit as st
 from PIL import Image
-from transformers import BlipProcessor, BlipForConditionalGeneration, pipeline
+from transformers import BlipProcessor, BlipForConditionalGeneration
+from huggingface_hub import InferenceClient
 import os
 
 # ============================================================
@@ -176,22 +177,14 @@ def load_captioning_model():
     return processor, model
 
 
-@st.cache_resource(show_spinner="Loading story generation model (Phi-3-mini) ...")
-def load_story_model():
+def get_story_client():
     """
-    Load the Phi-3-mini text-generation pipeline from Hugging Face.
+    Return a Hugging Face Inference API client.
 
-    Phi-3-mini (3.8B parameters, ~2.3GB) is a small but powerful
-    instruction-following model that fits in Streamlit Cloud's memory
-    while producing high-quality stories.
+    The model runs on HF servers — no local download or GPU needed.
+    Free to use, no API key required.
     """
-    return pipeline(
-        "text-generation",
-        model="microsoft/Phi-3-mini-4k-instruct",
-        dtype="auto",
-        trust_remote_code=True,
-        model_kwargs={"attn_implementation": "eager"},
-    )
+    return InferenceClient()
 
 
 # ============================================================
@@ -230,20 +223,19 @@ def get_image_caption(image, processor, model):
     return caption
 
 
-def generate_story_from_caption(caption, story_pipe):
+def generate_story_from_caption(caption, client):
     """
-    Use Phi-3-mini (Hugging Face) to generate a children's story
+    Use Hugging Face Inference API (Mistral-7B) to generate a children's story
     (>= 500 words) that is directly based on the BLIP image description.
 
-    Phi-3-mini is an instruction-following model, so we format
-    the prompt as a chat conversation using its built-in template.
+    The model runs on HF servers — no local GPU or model download needed.
 
     Parameters
     ----------
     caption : str
         Image description produced by the BLIP model.
-    story_pipe : transformers.Pipeline
-        Pre-loaded Phi-3-mini text-generation pipeline.
+    client : huggingface_hub.InferenceClient
+        HF Inference API client.
 
     Returns
     -------
@@ -273,41 +265,21 @@ def generate_story_from_caption(caption, story_pipe):
         f"Write the full story now:"
     )
 
-    # Format as a Mistral chat conversation
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user",   "content": user_prompt},
     ]
 
-    output = story_pipe(
-        messages,
-        max_new_tokens=3000,       # generous budget for >= 500 words
+    # Use HF Inference API — model runs on HF servers, not locally
+    response = client.chat.completions.create(
+        model="mistralai/Mistral-7B-Instruct-v0.3",
+        messages=messages,
+        max_tokens=3000,
         temperature=0.8,
         top_p=0.9,
-        do_sample=True,
-        repetition_penalty=1.3,
-        num_return_sequences=1,
     )
 
-    story = output[0]["generated_text"]
-
-    # The pipeline returns the full chat including special tokens;
-    # extract only the assistant's response content.
-    if isinstance(story, str):
-        # Phi-3 chat template: assistant reply appears after <|assistant|>
-        for marker in ["<|assistant|>", "assistant"]:
-            idx = story.rfind(marker)
-            if idx != -1:
-                story = story[idx + len(marker):]
-                break
-        story = story.strip()
-        # Remove any trailing <|end|> or  tags
-        for end_tag in ["<|end|>", ""]:
-            pos = story.find(end_tag)
-            if pos != -1:
-                story = story[:pos]
-        story = story.strip()
-
+    story = response.choices[0].message.content.strip()
     return story
 
 
@@ -379,10 +351,10 @@ def main():
                 caption = get_image_caption(image, processor, model)
                 st.session_state.caption = caption
 
-            # --- Step 2: Story Generation (Mistral-7B) ---
+            # --- Step 2: Story Generation (HF Inference API — Mistral-7B) ---
             with st.spinner("\u270D\uFE0F  Writing a magical story (this may take a moment) \u2026"):
-                story_pipe = load_story_model()
-                story = generate_story_from_caption(caption, story_pipe)
+                client = get_story_client()
+                story = generate_story_from_caption(caption, client)
                 st.session_state.story = story
 
             # --- Step 3: Text-to-Speech ---
@@ -427,7 +399,7 @@ def main():
             )
             st.markdown(
                 '<p style="text-align:center; color:#636e72; font-size:0.9rem;">'
-                "\u2B06 This story was generated by Phi-3-mini based on the image description above"
+                "\u2B06 This story was generated by Mistral-7B (Hugging Face Inference API) based on the image description above"
                 "</p>",
                 unsafe_allow_html=True,
             )
