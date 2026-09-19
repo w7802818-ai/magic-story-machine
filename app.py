@@ -309,19 +309,63 @@ def generate_story_from_caption(caption, story_pipe):
     return story.strip()
 
 
+def clean_text_for_tts(text):
+    """
+    Clean and optimise story text for gTTS to improve sentence breaks
+    and prosody.
+
+    Fixes common issues:
+    - Strips markdown formatting (bold, italic, headers)
+    - Ensures every sentence ends with clear punctuation
+    - Adds pauses at natural break points
+    - Removes duplicate whitespace
+    """
+    import re
+
+    # Remove markdown formatting
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)   # **bold**
+    text = re.sub(r"\*(.+?)\*", r"\1", text)        # *italic*
+    text = re.sub(r"#{1,6}\s*", "", text)            # headers
+    text = re.sub(r"```[\s\S]*?```", "", text)       # code blocks
+
+    # Normalise line endings: paragraph breaks → double period (longer pause)
+    text = re.sub(r"\n\s*\n", ".. ", text)
+    text = re.sub(r"\n", ". ", text)
+
+    # Ensure sentences end with proper punctuation
+    # If a line ends without punctuation, add a period
+    text = re.sub(r"([a-zA-Z])\s*\.\s*\.\s*", r"\1. ", text)  # collapse double periods
+
+    # Add a pause after exclamation / question marks (gTTS sometimes rushes)
+    text = text.replace("! ", "!. ")
+    text = text.replace("? ", "?. ")
+
+    # Clean up multiple spaces
+    text = re.sub(r" {2,}", " ", text)
+
+    # Remove leading/trailing whitespace per line
+    lines = [line.strip() for line in text.split(". ")]
+    text = ". ".join(line for line in lines if line)
+
+    return text.strip()
+
+
 def generate_audio_file(text):
     """
     Convert *text* to an MP3 audio file via gTTS.
 
-    Uses a temporary file to ensure it works on Streamlit Cloud
-    where the working directory may not be writable.
+    Text is pre-processed with clean_text_for_tts() for better
+    sentence breaks and prosody.  Uses a temporary file to ensure
+    it works on Streamlit Cloud where the working directory may
+    not be writable.
 
     Returns the file path on success, or None on failure.
     """
     try:
         from gtts import gTTS
 
-        tts = gTTS(text=text, lang="en", slow=True)   # slow for kids
+        cleaned = clean_text_for_tts(text)
+        tts = gTTS(text=cleaned, lang="en", slow=True)   # slow for kids
         path = os.path.join(tempfile.gettempdir(), "story.mp3")
         tts.save(path)
         return path
