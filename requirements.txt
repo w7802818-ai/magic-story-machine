@@ -1,0 +1,23 @@
+# ISOM5240 Individual Assignment — Dependencies
+# ================================
+
+# Web application framework
+streamlit>=1.28.0
+
+# Hugging Face Transformers (pipelines for captioning & story generation)
+transformers>=4.35.0
+
+# PyTorch — backend for Transformers models
+torch>=2.0.0
+
+# Pillow — image handling
+Pillow>=10.0.0
+
+# Google Text-to-Speech — converts story text to audio
+gTTS>=2.3.0
+
+# SentencePiece — required by some tokenizer configurations
+sentencepiece>=0.1.99
+
+# Protobuf — required by transformers internals
+protobuf>=3.20.0
